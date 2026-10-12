@@ -1,8 +1,13 @@
-# Локальные файлы окружения: создаются tripgoctl, у каждого свои
+# Локальное окружение
 .env
 .tripgo/
+.idea/
 
-# Сборка
+# Результаты сборки и тестов
 bin/
+coverage.out
+/trip-service
+/trip-service.exe
 
+# Системные файлы
 .DS_Store

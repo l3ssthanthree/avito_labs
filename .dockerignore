@@ -1,0 +1,11 @@
+.git
+.github
+.idea
+.tripgo
+.env
+.env.*
+!.env.example
+bin
+coverage.out
+**/*_test.go
+README.md
