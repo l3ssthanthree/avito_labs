@@ -58,7 +58,8 @@ make docker-build   # сборка Docker-образа
 | `DATABASE_CONNECT_TIMEOUT` | таймаут подключения к PostgreSQL |
 | `DATABASE_QUERY_TIMEOUT` | таймаут операции с PostgreSQL |
 
-Пример находится в `.env.example`. Локальный `.env` создает `tripgoctl`.
+`Makefile` загружает безопасные значения из `.env.example`, затем применяет
+значения локального окружения из созданного `tripgoctl` файла `.env`.
 
 ## HTTP API
 
@@ -124,11 +125,11 @@ source .env
 set +a
 
 docker run --rm \
-  --add-host host.docker.internal:host-gateway \
+  --env-file .env.example \
   --env-file .env \
   -e DATABASE_URL="${DATABASE_URL/localhost/host.docker.internal}" \
   -p 8080:8080 \
   trip-service:local
 ```
 
-Размер образа: 15.9 MB по выводу `docker images trip-service:local`.
+Размер образа: 18.9 MB по выводу `docker images trip-service:local`.

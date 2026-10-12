@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
+	oapimiddleware "github.com/oapi-codegen/nethttp-middleware"
 
 	"github.com/l3ssthanthree/avito_labs/api"
 	"github.com/l3ssthanthree/avito_labs/internal/config"
@@ -69,12 +70,32 @@ func main() {
 		cfg.Database.QueryTimeout, cfg.IdempotencyKeyTTL,
 	)
 	httpHandler := handler.New(database, tripService, cfg.Database.QueryTimeout, logger)
+	openAPISpec, err := api.GetSpec()
+	if err != nil {
+		logger.Error("load OpenAPI specification", "error", err)
+		os.Exit(1)
+	}
 
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
 	router.Use(middleware.RealIP)
 	router.Use(middleware.Logger)
 	router.Use(middleware.Recoverer)
+	router.Use(oapimiddleware.OapiRequestValidatorWithOptions(
+		openAPISpec,
+		&oapimiddleware.Options{
+			DoNotValidateServers: true,
+			ErrorHandlerWithOpts: func(
+				_ context.Context,
+				err error,
+				w http.ResponseWriter,
+				r *http.Request,
+				_ oapimiddleware.ErrorHandlerOpts,
+			) {
+				httpHandler.OpenAPIError(w, r, err)
+			},
+		},
+	))
 
 	api.HandlerWithOptions(httpHandler, api.ChiServerOptions{
 		BaseRouter:       router,
