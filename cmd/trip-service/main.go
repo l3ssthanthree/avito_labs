@@ -4,134 +4,81 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	"github.com/jackc/pgx/v5/pgxpool"
-	oapimiddleware "github.com/oapi-codegen/nethttp-middleware"
-
-	"github.com/l3ssthanthree/avito_labs/api"
 	"github.com/l3ssthanthree/avito_labs/internal/config"
-	"github.com/l3ssthanthree/avito_labs/internal/handler"
-	"github.com/l3ssthanthree/avito_labs/internal/repository"
-	"github.com/l3ssthanthree/avito_labs/internal/service"
-	"github.com/l3ssthanthree/avito_labs/internal/txmanager"
+	"github.com/l3ssthanthree/avito_labs/internal/container"
 )
 
 func main() {
+	os.Exit(run(context.Background()))
+}
+
+func run(ctx context.Context) int {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "trip-service")
 	cfg, err := config.Load()
 	if err != nil {
-		slog.Error("load configuration", "error", err)
-		os.Exit(1)
+		logger.Error("load configuration", "error", err)
+		return 1
 	}
 
-	logLevel := new(slog.Level)
-	if err := logLevel.UnmarshalText([]byte(cfg.LogLevel)); err != nil {
-		slog.Error("parse log level", "value", cfg.LogLevel, "error", err)
-		os.Exit(1)
-	}
+	signalCtx, stopSignals := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})).With("service", "trip-service")
-	slog.SetDefault(logger)
-
-	databaseConfig, err := pgxpool.ParseConfig(cfg.Database.URL)
+	app, err := container.New(signalCtx, cfg)
 	if err != nil {
-		logger.Error("parse database configuration", "error", err)
-		os.Exit(1)
+		logger.Error("initialize service", "error", err)
+		return 1
 	}
-	databaseConfig.MaxConns = cfg.Database.MaxConns
-	databaseConfig.MinConns = cfg.Database.MinConns
-	databaseConfig.MaxConnLifetime = cfg.Database.MaxConnLifetime
 
-	connectCtx, cancelConnect := context.WithTimeout(context.Background(), cfg.Database.ConnectTimeout)
-	database, err := pgxpool.NewWithConfig(connectCtx, databaseConfig)
+	var listenConfig net.ListenConfig
+	listener, err := listenConfig.Listen(signalCtx, "tcp", app.Server.Addr)
 	if err != nil {
-		cancelConnect()
-		logger.Error("create database pool", "error", err)
-		os.Exit(1)
-	}
-	if err := database.Ping(connectCtx); err != nil {
-		cancelConnect()
-		database.Close()
-		logger.Error("ping database", "error", err)
-		os.Exit(1)
-	}
-	cancelConnect()
-	defer database.Close()
-
-	tripRepository := repository.NewTripRepository(database)
-	transactionManager := txmanager.New(database)
-	tripService := service.NewTripService(
-		tripRepository, transactionManager,
-		cfg.Database.QueryTimeout, cfg.IdempotencyKeyTTL,
-	)
-	httpHandler := handler.New(database, tripService, cfg.Database.QueryTimeout, logger)
-	openAPISpec, err := api.GetSpec()
-	if err != nil {
-		logger.Error("load OpenAPI specification", "error", err)
-		os.Exit(1)
-	}
-
-	router := chi.NewRouter()
-	router.Use(middleware.RequestID)
-	router.Use(middleware.RealIP)
-	router.Use(middleware.Logger)
-	router.Use(middleware.Recoverer)
-	router.Use(oapimiddleware.OapiRequestValidatorWithOptions(
-		openAPISpec,
-		&oapimiddleware.Options{
-			DoNotValidateServers: true,
-			ErrorHandlerWithOpts: func(
-				_ context.Context,
-				err error,
-				w http.ResponseWriter,
-				r *http.Request,
-				_ oapimiddleware.ErrorHandlerOpts,
-			) {
-				httpHandler.OpenAPIError(w, r, err)
-			},
-		},
-	))
-
-	api.HandlerWithOptions(httpHandler, api.ChiServerOptions{
-		BaseRouter:       router,
-		ErrorHandlerFunc: httpHandler.OpenAPIError,
-	})
-
-	server := &http.Server{
-		Addr: cfg.HTTP.Addr, Handler: router,
-		ReadTimeout: cfg.HTTP.ReadTimeout, ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout,
-		WriteTimeout: cfg.HTTP.WriteTimeout, IdleTimeout: cfg.HTTP.IdleTimeout,
+		app.Logger.Error("listen for HTTP requests", "error", err)
+		closeApp(ctx, app, cfg.ShutdownTimeout)
+		return 1
 	}
 
 	serverErrors := make(chan error, 1)
 	go func() {
-		logger.Info("HTTP server started", "address", cfg.HTTP.Addr)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErrors <- err
-		}
+		serverErrors <- app.Server.Serve(listener)
 	}()
-
-	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
+	app.Logger.Info("HTTP server started", "address", listener.Addr().String())
 
 	select {
 	case <-signalCtx.Done():
-		logger.Info("shutdown signal received")
+		app.Logger.Info("shutdown signal received")
 	case err := <-serverErrors:
-		logger.Error("HTTP server failed", "error", err)
-		return
+		closeApp(ctx, app, cfg.ShutdownTimeout)
+		if !errors.Is(err, http.ErrServerClosed) {
+			app.Logger.Error("HTTP server failed", "error", err)
+			return 1
+		}
+		return 0
 	}
 
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	shutdownCtx, cancelShutdown := context.WithTimeout(ctx, cfg.ShutdownTimeout)
 	defer cancelShutdown()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error("shutdown HTTP server", "error", err)
-		os.Exit(1)
+	if err := app.Server.Shutdown(shutdownCtx); err != nil {
+		app.Logger.Error("shutdown HTTP server", "error", err)
+		return 1
 	}
-	logger.Info("HTTP server stopped")
+	if err := app.Close(shutdownCtx); err != nil {
+		app.Logger.Warn("flush telemetry", "error", err)
+	}
+	app.Logger.Info("HTTP server stopped")
+	return 0
+}
+
+func closeApp(ctx context.Context, app *container.Container, timeout time.Duration) {
+	closeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := app.Close(closeCtx); err != nil {
+		app.Logger.Warn("flush telemetry", "error", err)
+	}
 }

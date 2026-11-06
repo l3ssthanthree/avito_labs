@@ -13,6 +13,7 @@ type Config struct {
 	ShutdownTimeout   time.Duration
 	IdempotencyKeyTTL time.Duration
 	Database          DatabaseConfig
+	Telemetry         TelemetryConfig
 }
 
 type HTTPConfig struct {
@@ -113,6 +114,11 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("DATABASE_MIN_CONNS must not exceed DATABASE_MAX_CONNS")
 	}
 
+	telemetry, err := loadTelemetry()
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		HTTP: HTTPConfig{
 			Addr:              httpAddr,
@@ -124,6 +130,7 @@ func Load() (Config, error) {
 		LogLevel:          logLevel,
 		ShutdownTimeout:   shutdownTimeout,
 		IdempotencyKeyTTL: idempotencyKeyTTL,
+		Telemetry:         telemetry,
 		Database: DatabaseConfig{
 			URL:             databaseURL,
 			MaxConns:        maxConns,
