@@ -1,4 +1,4 @@
-package txmanager
+package transaction
 
 import (
 	"context"
@@ -7,21 +7,15 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-type DBTX interface {
-	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
 
 type contextKey struct{}
 
 type Manager struct {
-	pool *pgxpool.Pool
+	pool databasePool
 }
 
-func New(pool *pgxpool.Pool) *Manager {
+func New(pool databasePool) *Manager {
 	return &Manager{pool: pool}
 }
 
@@ -58,11 +52,19 @@ func (m *Manager) Do(ctx context.Context, fn func(ctx context.Context) error) (e
 	return nil
 }
 
-func Executor(ctx context.Context, pool *pgxpool.Pool) DBTX {
+func (m *Manager) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	return m.executor(ctx).Exec(ctx, sql, args...)
+}
+
+func (m *Manager) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return m.executor(ctx).QueryRow(ctx, sql, args...)
+}
+
+func (m *Manager) executor(ctx context.Context) dbExecutor {
 	if tx := transactionFromContext(ctx); tx != nil {
 		return tx
 	}
-	return pool
+	return m.pool
 }
 
 func transactionFromContext(ctx context.Context) pgx.Tx {

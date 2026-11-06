@@ -1,7 +1,7 @@
 # Trip Service
 
-Сервис лабораторной работы 1. Создает, возвращает и завершает поездки.
-Данные хранятся в PostgreSQL.
+Сервис создает, возвращает и завершает поездки. Данные хранятся в PostgreSQL.
+В ЛР2 добавлены тесты, проверка архитектуры линтером и телеметрия.
 
 ## Требования
 
@@ -30,14 +30,21 @@ curl -i localhost:8080/ready
 ## Команды
 
 ```bash
-make generate       # генерация Go-кода из OpenAPI
+make generate       # генерация Go-кода из OpenAPI и моков
 make migrate        # применение миграций
 make migrate-down   # откат последней миграции
 make run            # запуск сервиса
-make test           # тесты с race detector
+make test           # тесты с race detector и покрытие домена и usecase
+make test-integration # тесты с реальным PostgreSQL
+make lint           # golangci-lint с проверкой зависимостей между слоями
 make build          # сборка проекта
 make docker-build   # сборка Docker-образа
 ```
+
+Для `make test-integration` сначала запустите окружение через
+`tripgoctl environment start`. Тесты используют `DATABASE_URL` из `.env`.
+Каждый тест применяет миграции в своей временной схеме и удаляет ее при
+завершении. Для этой команды не нужно заранее выполнять `make migrate`.
 
 ## Переменные окружения
 
@@ -57,6 +64,12 @@ make docker-build   # сборка Docker-образа
 | `DATABASE_MAX_CONN_LIFETIME` | максимальное время жизни соединения |
 | `DATABASE_CONNECT_TIMEOUT` | таймаут подключения к PostgreSQL |
 | `DATABASE_QUERY_TIMEOUT` | таймаут операции с PostgreSQL |
+| `OTEL_SERVICE_NAME` | имя сервиса в телеметрии |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | адрес коллектора из `.env` |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | протокол `http/protobuf` или `grpc` |
+| `OTEL_RESOURCE_ATTRIBUTES` | атрибуты ресурса OpenTelemetry |
+| `OTEL_TRACES_SAMPLER` | режим сэмплирования трейсов |
+| `OTEL_METRIC_EXPORT_INTERVAL` | интервал экспорта метрик в миллисекундах |
 
 `Makefile` загружает безопасные значения из `.env.example`, затем применяет
 значения локального окружения из созданного `tripgoctl` файла `.env`.
@@ -72,7 +85,34 @@ make docker-build   # сборка Docker-образа
 | `GET` | `/ready` | проверить PostgreSQL |
 
 Источник контракта: `contracts/openapi/trip-service.openapi.yaml`.
-Сгенерированный файл: `api/api.gen.go`.
+Сгенерированный файл: `internal/generated/api/api.gen.go`.
+
+## Архитектура
+
+- `cmd/trip-service` читает конфигурацию и управляет запуском и остановкой.
+  Конкретные реализации связываются в `internal/container`.
+- `internal/http` содержит отдельные обработчики создания, чтения и
+  завершения поездки. Перевод ошибок в HTTP-ответы собран в `domainerror`.
+- `internal/usecase/trip` содержит сценарии работы с поездкой.
+  Хендлеры и сценарии объявляют нужные им интерфейсы в своих `contract.go`.
+- `internal/domain/trip` содержит модель поездки, ее состояния, правила
+  переходов, валидацию и доменные ошибки.
+- `internal/repository/trip` выполняет SQL через менеджер транзакций из
+  `internal/infra/postgres/transaction`. Репозиторий получает исполнитель
+  запросов через свой интерфейс.
+- `internal/infra/telemetry` настраивает OpenTelemetry и JSON-логи. Обертка
+  над сценариями создания и завершения записывает бизнес-события после коммита.
+
+## Наблюдаемость
+
+Откройте Jaeger и Grafana по ссылкам из `tripgoctl connect`. Отправьте запрос
+на создание поездки и найдите в JSON-логе `trace_id`. По нему в Jaeger можно
+открыть HTTP-спан и вложенные спаны PostgreSQL. В Grafana Explore выберите
+Prometheus и запросите `http_server_request_duration_seconds_count` и
+`tripgo_trips_created_total`.
+
+В логах, метриках и именах HTTP-спанов используется шаблон маршрута.
+Повтор создания с тем же ключом идемпотентности не увеличивает счетчик поездок.
 
 ## Решения
 
@@ -96,9 +136,10 @@ make docker-build   # сборка Docker-образа
 
 ### Конкурентное завершение
 
-Завершение использует `UPDATE` с условием `status = 'active'`. Поэтому только
-один конкурентный запрос изменяет поездку. Остальные получают
-`409 trip_completed`.
+Доменный метод `Trip.Finish` меняет состояние поездки. Репозиторий сохраняет
+изменение через `UPDATE` с условием `status = 'active'`. Поэтому только один
+конкурентный запрос изменяет поездку. Остальные получают `409 trip_completed`.
+Запись истории входит в ту же транзакцию.
 
 ### Идемпотентность
 
@@ -128,8 +169,7 @@ docker run --rm \
   --env-file .env.example \
   --env-file .env \
   -e DATABASE_URL="${DATABASE_URL/localhost/host.docker.internal}" \
+  -e OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT/localhost/host.docker.internal}" \
   -p 8080:8080 \
   trip-service:local
 ```
-
-Размер образа: 18.9 MB по выводу `docker images trip-service:local`.
