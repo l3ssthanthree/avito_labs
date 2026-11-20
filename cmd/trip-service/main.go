@@ -20,7 +20,7 @@ func main() {
 }
 
 func run(ctx context.Context) int {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "trip-service")
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "trip-service", "trace_id", "", "span_id", "")
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("load configuration", "error", err)
@@ -45,6 +45,7 @@ func run(ctx context.Context) int {
 	}
 
 	serverErrors := make(chan error, 1)
+	app.Start(ctx)
 	go func() {
 		serverErrors <- app.Server.Serve(listener)
 	}()
@@ -66,10 +67,13 @@ func run(ctx context.Context) int {
 	defer cancelShutdown()
 	if err := app.Server.Shutdown(shutdownCtx); err != nil {
 		app.Logger.Error("shutdown HTTP server", "error", err)
+		_ = app.Server.Close()
+		_ = app.Close(shutdownCtx)
 		return 1
 	}
 	if err := app.Close(shutdownCtx); err != nil {
-		app.Logger.Warn("flush telemetry", "error", err)
+		app.Logger.Error("stop service components", "error", err)
+		return 1
 	}
 	app.Logger.Info("HTTP server stopped")
 	return 0

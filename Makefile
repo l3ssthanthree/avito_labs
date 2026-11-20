@@ -8,9 +8,11 @@ GOLANGCI_LINT ?= go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v
 
 generate:
 	go tool oapi-codegen -generate types,chi-server,spec \
-		-include-operation-ids createTrip,getTrip,finishTrip,health,ready \
+		-include-operation-ids createTrip,getTrip,finishTrip,createTripPosition,listTripPositions,health,ready \
 		-package api -o internal/generated/api/api.gen.go \
 		contracts/openapi/trip-service.openapi.yaml
+	go tool oapi-codegen -generate types,client -include-operation-ids sendPush \
+		-package push -o internal/generated/push/api.gen.go contracts/openapi/push-service.openapi.yaml
 	go generate ./internal/...
 
 migrate:
@@ -31,7 +33,7 @@ test:
 
 test-integration:
 	set -a; source $(ENV_DEFAULTS); source $(ENV_FILE); set +a; \
-		go test -race -count=2 -tags=integration ./internal/repository/...
+		go test -race -count=2 -tags=integration ./internal/repository/... ./internal/gateway/...
 
 lint:
 	$(GOLANGCI_LINT) run ./...

@@ -14,6 +14,7 @@ type Config struct {
 	IdempotencyKeyTTL time.Duration
 	Database          DatabaseConfig
 	Telemetry         TelemetryConfig
+	Positions         PositionsConfig
 }
 
 type HTTPConfig struct {
@@ -118,6 +119,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	positions, err := loadPositions()
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		HTTP: HTTPConfig{
@@ -131,6 +136,7 @@ func Load() (Config, error) {
 		ShutdownTimeout:   shutdownTimeout,
 		IdempotencyKeyTTL: idempotencyKeyTTL,
 		Telemetry:         telemetry,
+		Positions:         positions,
 		Database: DatabaseConfig{
 			URL:             databaseURL,
 			MaxConns:        maxConns,

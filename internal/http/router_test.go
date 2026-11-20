@@ -28,7 +28,7 @@ func TestRoutingErrors(t *testing.T) {
 		status                          int
 	}{
 		{"unknown path", http.MethodGet, "/unknown", "route_not_found", "", http.StatusNotFound},
-		{"unimplemented future route", http.MethodPost, validTrip + "/positions", "route_not_found", "", http.StatusNotFound},
+		{"wrong positions method", http.MethodDelete, validTrip + "/positions", "method_not_allowed", "GET, POST", http.StatusMethodNotAllowed},
 		{"unknown method and path", "BREW", "/unknown", "route_not_found", "", http.StatusNotFound},
 		{"wrong create method", http.MethodGet, "/api/v1/trips", "method_not_allowed", http.MethodPost, http.StatusMethodNotAllowed},
 		{"wrong get method", http.MethodDelete, validTrip, "method_not_allowed", http.MethodGet, http.StatusMethodNotAllowed},

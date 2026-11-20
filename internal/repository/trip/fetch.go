@@ -27,7 +27,7 @@ func (r *Repository) Get(ctx context.Context, tripID uuid.UUID) (domain.Trip, er
 			"id", "user_id", "driver_id",
 			"start_latitude", "start_longitude",
 			"end_latitude", "end_longitude",
-			"price", "status", "started_at", "finished_at",
+			"price", "status", "started_at", "finished_at", "last_position_at",
 		).
 		From("trips").
 		Where(sq.Eq{"id": tripID}).

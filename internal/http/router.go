@@ -12,6 +12,8 @@ import (
 
 	"github.com/l3ssthanthree/avito_labs/internal/generated/api"
 	"github.com/l3ssthanthree/avito_labs/internal/http/health"
+	positionlist "github.com/l3ssthanthree/avito_labs/internal/http/position/list"
+	positionsave "github.com/l3ssthanthree/avito_labs/internal/http/position/save"
 	"github.com/l3ssthanthree/avito_labs/internal/http/ready"
 	"github.com/l3ssthanthree/avito_labs/internal/http/response"
 	"github.com/l3ssthanthree/avito_labs/internal/http/trip/create"
@@ -20,6 +22,8 @@ import (
 )
 
 type Endpoints struct {
+	*positionsave.Save
+	*positionlist.List
 	*create.Create
 	*get.Get
 	*finish.Finish

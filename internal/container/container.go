@@ -5,13 +5,17 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/l3ssthanthree/avito_labs/internal/config"
+	"github.com/l3ssthanthree/avito_labs/internal/gateway/push"
 	transport "github.com/l3ssthanthree/avito_labs/internal/http"
 	"github.com/l3ssthanthree/avito_labs/internal/http/health"
 	"github.com/l3ssthanthree/avito_labs/internal/http/middleware"
+	positionlisthttp "github.com/l3ssthanthree/avito_labs/internal/http/position/list"
+	positionsavehttp "github.com/l3ssthanthree/avito_labs/internal/http/position/save"
 	"github.com/l3ssthanthree/avito_labs/internal/http/ready"
 	"github.com/l3ssthanthree/avito_labs/internal/http/response"
 	createhttp "github.com/l3ssthanthree/avito_labs/internal/http/trip/create"
@@ -21,9 +25,12 @@ import (
 	"github.com/l3ssthanthree/avito_labs/internal/infra/postgres/transaction"
 	"github.com/l3ssthanthree/avito_labs/internal/infra/telemetry"
 	repository "github.com/l3ssthanthree/avito_labs/internal/repository/trip"
+	positionlist "github.com/l3ssthanthree/avito_labs/internal/usecase/position/list"
+	positionsave "github.com/l3ssthanthree/avito_labs/internal/usecase/position/save"
 	"github.com/l3ssthanthree/avito_labs/internal/usecase/trip/create"
 	"github.com/l3ssthanthree/avito_labs/internal/usecase/trip/finish"
 	"github.com/l3ssthanthree/avito_labs/internal/usecase/trip/get"
+	"github.com/l3ssthanthree/avito_labs/internal/worker/positions"
 )
 
 type Container struct {
@@ -31,6 +38,8 @@ type Container struct {
 	Logger        *slog.Logger
 	database      *pgxpool.Pool
 	observability *telemetry.Telemetry
+	positions     *positions.Pool
+	push          *push.Gateway
 }
 
 func New(ctx context.Context, cfg config.Config) (_ *Container, err error) {
@@ -54,9 +63,29 @@ func New(ctx context.Context, cfg config.Config) (_ *Container, err error) {
 	if err != nil {
 		return nil, err
 	}
-	handler, err := newHTTPHandler(database, cfg, observability)
+	defer func() {
+		if err != nil {
+			database.Close()
+		}
+	}()
+	pushGateway, err := push.New(cfg.Positions.PushURL, cfg.Positions.PushTimeout, observability.Traces)
 	if err != nil {
-		database.Close()
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			pushGateway.Close()
+		}
+	}()
+	transactionManager := transaction.New(database)
+	tripRepository := repository.New(transactionManager)
+	worker, err := positions.New(tripRepository, pushGateway, cfg.Positions, cfg.Database.QueryTimeout,
+		positions.RealClock{}, observability.Logger, observability.Traces, observability.Meters.Meter("tripgo/positions"))
+	if err != nil {
+		return nil, err
+	}
+	handler, err := newHTTPHandler(database, cfg, observability, transactionManager, tripRepository, worker)
+	if err != nil {
 		return nil, err
 	}
 	return &Container{
@@ -69,12 +98,13 @@ func New(ctx context.Context, cfg config.Config) (_ *Container, err error) {
 			IdleTimeout:       cfg.HTTP.IdleTimeout,
 		},
 		Logger: observability.Logger, database: database, observability: observability,
+		positions: worker, push: pushGateway,
 	}, nil
 }
 
-func newHTTPHandler(database *pgxpool.Pool, cfg config.Config, observability *telemetry.Telemetry) (http.Handler, error) {
-	transactionManager := transaction.New(database)
-	tripRepository := repository.New(transactionManager)
+func newHTTPHandler(database *pgxpool.Pool, cfg config.Config, observability *telemetry.Telemetry,
+	transactionManager *transaction.Manager, tripRepository *repository.Repository, worker *positions.Pool,
+) (http.Handler, error) {
 	queryTimeout := cfg.Database.QueryTimeout
 	createTrip := create.New(tripRepository, transactionManager, queryTimeout, cfg.IdempotencyKeyTTL)
 	getTrip := get.New(tripRepository, queryTimeout)
@@ -86,7 +116,15 @@ func newHTTPHandler(database *pgxpool.Pool, cfg config.Config, observability *te
 		return nil, err
 	}
 	writer := response.New(observability.Logger)
+	positionSaver := positionsave.New(tripRepository, transactionManager, worker, queryTimeout, time.Now)
+	positionEvents, err := telemetry.NewPositionEvents(positionSaver, tripsMeter)
+	if err != nil {
+		return nil, err
+	}
+	positionReader := positionlist.New(tripRepository, queryTimeout)
 	router, err := transport.NewRouter(transport.Endpoints{
+		Save:      positionsavehttp.New(positionEvents, writer),
+		List:      positionlisthttp.New(positionReader, writer),
 		Create:    createhttp.New(events, writer),
 		Get:       gethttp.New(getTrip, writer),
 		Finish:    finishhttp.New(events, writer),
@@ -112,7 +150,13 @@ func newHTTPHandler(database *pgxpool.Pool, cfg config.Config, observability *te
 }
 
 func (c *Container) Close(ctx context.Context) error {
+	if err := c.positions.Stop(ctx); err != nil {
+		return err
+	}
+	c.push.Close()
 	err := c.observability.Close(ctx)
 	c.database.Close()
 	return err
 }
+
+func (c *Container) Start(ctx context.Context) { c.positions.Start(ctx) }

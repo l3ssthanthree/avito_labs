@@ -60,6 +60,10 @@ func (m *Manager) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	return m.executor(ctx).QueryRow(ctx, sql, args...)
 }
 
+func (m *Manager) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	return m.executor(ctx).Query(ctx, sql, args...)
+}
+
 func (m *Manager) executor(ctx context.Context) dbExecutor {
 	if tx := transactionFromContext(ctx); tx != nil {
 		return tx
